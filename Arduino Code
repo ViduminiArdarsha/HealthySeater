@@ -1,0 +1,293 @@
+#define PIR 7
+#define PressureSensor A0
+#define speaker 3
+#define vibrator 9
+#define trig 5
+#define echo 6
+#include <SoftwareSerial.h>
+#include<EEPROM.h>
+
+//For observing if working time more than 30 mins
+unsigned long time=0;
+unsigned long escaped = 0;
+
+unsigned long lastSeatedTime = 0; //To store the last seated time in millis
+bool isLastSeatedTimeRecorded = false; //To store whether the last seated time is recorded
+unsigned long totalSeatedTime = 0; //To calculate the actual seated time to send to the Android app
+unsigned long setupExitTime = 0; //Stores the time when the program exits from void setup()
+unsigned long freshlySeatedTime = 0; //To store the freshly seated time
+
+float duration,distance;
+int pirVal,pressureSenVal;
+
+//Bluetooth Module connections
+const int rxPin = 10; // Connect Bluetooth Module RX pin to Arduino Pin 11
+const int txPin = 11; // Connect Bluetooth Module TX pin to Arduino Pin 10
+SoftwareSerial bluetooth(rxPin, txPin);
+
+//Notification Sending Timer
+unsigned long lastTimeSleepNot = 0;
+unsigned long lastTimeBadPostureNot=0;
+unsigned long lastTimeOverWorkNot=0;
+
+bool isSendSleepNot = false;
+bool isSendBadPostureNot=false;
+bool isSendOverWorkNot=false;
+
+int notificationGap=5000;
+
+//vibrationMode on and off
+bool alert=false;
+bool vibrationMode=false;
+
+//EEPROM
+const int addrNeck = 5;  
+const int addrPressure = 6;
+
+void setup() {
+  //PIR SENSOR
+  pinMode(PIR,INPUT);
+  //PRESSURE SENSOR
+  pinMode(PressureSensor,INPUT);
+  //SPEAKER
+  pinMode(speaker,OUTPUT);
+  //VIBRATION MORTOR
+  pinMode(vibrator,OUTPUT);
+  //ULTRASONIC SENSOR
+  pinMode(trig,OUTPUT);
+  pinMode(echo,INPUT);
+  //SERIAL MONITOR
+  Serial.begin(9600);
+  //Bluetooth Connection
+  bluetooth.begin(9600);
+
+  Serial.println("Press OK after sitting properly...");
+  while(true){
+    if (bluetooth.available()) {
+        String data = bluetooth.readStringUntil('\n'); // Read until newline
+        Serial.print("Received data: ");
+        Serial.println(data);
+
+        if(data=="GET_DATA"){
+            writeEEPROMFun();
+            break;
+        }
+    }
+    delay(10);
+  }
+  Serial.println("Calibration Done...\n");
+  setupExitTime = millis();
+  delay(100);
+}
+
+ 
+void loop() {
+  pirVal=digitalRead(PIR);
+  Serial.print("Human Present?: ");
+  Serial.println(pirVal);
+
+    if(pirVal==1){
+
+      alert=false;
+      
+      if (isLastSeatedTimeRecorded) {
+        escaped += millis() - lastSeatedTime;
+        freshlySeatedTime = (millis() - setupExitTime) - escaped;
+        isLastSeatedTimeRecorded = false;
+      }
+      time=millis();//Timer to check working time
+      totalSeatedTime= (time-setupExitTime)-escaped;
+        
+      //PRESSURE SENSOR
+      Serial.println(pressureFun());
+
+      //ULTRASONIC SENSOR
+      Serial.println(distanceFun());
+      
+      unsigned long timer = millis();//Timer for Notification
+      String sendData = String("<working;") + String(totalSeatedTime) + String(" , ") + String(" starting;") + String("08:00>");
+      bluetooth.print(sendData);
+      Serial.println(sendData);
+      delay(1000);
+
+      Serial.print("\n");
+      Serial.print("Currunt Seated Time: ");
+      Serial.println((totalSeatedTime - freshlySeatedTime)/1000);
+
+      if( ((totalSeatedTime-freshlySeatedTime)/1000) >=60){//Currently set to 60 secs 
+        alert=true;
+        turnOnAlert(alert);
+
+       if(!isSendOverWorkNot){
+        bluetooth.print("<getUp>"); 
+        isSendOverWorkNot = true;
+        lastTimeOverWorkNot = timer;
+        Serial.println("Notification Sent-OverWork");
+        }
+
+        if((timer - lastTimeOverWorkNot) >notificationGap){
+          isSendOverWorkNot = false;
+        }
+    }else{
+        noTone(speaker);
+    }
+      
+    if(isMinPressueExceed()){
+          alert=true; 
+          turnOnAlert(alert);
+          
+     
+        if(!isSendBadPostureNot){
+          bluetooth.print("<badPosture>"); 
+          isSendBadPostureNot = true;
+          lastTimeBadPostureNot = timer;
+          Serial.println("Notification Sent-BadPosture");
+         }
+
+        if((timer - lastTimeBadPostureNot) >notificationGap){
+          isSendBadPostureNot = false;
+        }
+     }else{
+      noTone(speaker);
+     }
+  
+  
+    if(isNeckDistanceExceed()){ 
+      alert=true;
+      turnOnAlert(alert);
+      
+      if(!isSendSleepNot){
+        bluetooth.print("<sleepy>"); 
+        isSendSleepNot = true;
+        lastTimeSleepNot = timer;
+        Serial.println("Notification Sent-Sleep");
+      }
+
+      if( (timer - lastTimeSleepNot) >notificationGap ){
+        isSendSleepNot = false;
+      }
+
+    }else{
+      noTone(speaker);
+    }
+
+
+  }else{
+    if (!isLastSeatedTimeRecorded) {
+      lastSeatedTime = millis();
+      isLastSeatedTimeRecorded = true;
+    }
+    noTone(speaker);
+  
+  }
+}
+
+void turnOnAlert(bool alert){
+  if(alert){
+    if (bluetooth.available()) {
+        String command = bluetooth.readStringUntil('\n');
+        if (command == "1") {
+            vibrationMode = true;  
+            Serial.println("Vibration mode ON");
+        } else if (command == "0") {
+            vibrationMode = false; 
+            Serial.println("Sound mode ON");
+        }
+    
+  }
+  if(vibrationMode){
+    vibrationPattern();
+  }else{
+    NotificationSound();
+  }      
+}else{
+  alert=false;
+}
+}
+
+
+float distanceFun(){
+    digitalWrite(trig,LOW);
+    delayMicroseconds(2);
+    digitalWrite(trig,HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trig,LOW);
+    duration=pulseIn(echo,HIGH);
+    distance=(duration*.0343)/2;
+    return distance;
+    delay(100);
+}
+
+float pressureFun(){
+     pressureSenVal=analogRead(PressureSensor);
+     pressureSenVal =map(pressureSenVal,1000,500,0,100);
+     Serial.print("Pressure on Chair: ");
+     return pressureSenVal;
+
+}
+
+void vibrationPattern(){
+      digitalWrite(vibrator,HIGH);
+      delay(200);
+      digitalWrite(vibrator,LOW);
+      delay(200);
+      digitalWrite(vibrator,HIGH);
+      delay(200);
+      digitalWrite(vibrator,LOW);
+      delay(800);
+}
+
+void NotificationSound() {
+  int tone1 = 440;   
+  int tone2 = 494;   
+  int tone3 = 523;   
+  
+  int duration = 300; 
+
+  tone(speaker, tone1, duration);
+  delay(duration + 50); 
+
+  tone(speaker, tone2, duration);
+  delay(duration + 50);
+
+  tone(speaker, tone3, duration);
+  delay(duration + 50);
+
+  noTone(speaker);
+}
+
+void writeEEPROMFun(){
+
+    float currentNeckDistance=distanceFun();
+    float currentMinPressure=pressureFun();
+          
+    // Store values in EEPROM
+    currentNeckDistance=currentNeckDistance+10;
+    currentMinPressure=currentMinPressure+10;
+    EEPROM.write(addrNeck,currentNeckDistance);
+    EEPROM.write(addrPressure, currentMinPressure);
+
+    float storedNeckDistance=EEPROM.read(addrNeck);
+    float storedMinPressure=EEPROM.read(addrPressure);
+
+    Serial.print("Stored neck distance: ");
+    Serial.println(storedNeckDistance);
+    Serial.print("Stored pressure: ");
+    Serial.println(storedMinPressure);
+}
+    
+bool isNeckDistanceExceed(){
+    float storedNeckDistance=EEPROM.read(addrNeck);
+    float currentNeckDistance=distanceFun();
+    return currentNeckDistance>storedNeckDistance;
+}
+
+bool isMinPressueExceed(){
+    float storedMinPressure=EEPROM.read(addrNeck);
+    float currentMinPressure=pressureFun();
+    return currentMinPressure>storedMinPressure;
+}
+
+
+
+
